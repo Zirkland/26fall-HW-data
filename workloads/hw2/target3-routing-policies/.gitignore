@@ -1,4 +1,6 @@
 __pycache__/
+.ruff_cache/
+.pytest_cache/
 *.py[cod]
 results/
 toolagent_trace.jsonl

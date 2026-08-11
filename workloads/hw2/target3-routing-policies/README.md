@@ -1,47 +1,60 @@
 # 作业二目标三：四副本在线路由负载
 
-本目录提供固定 workload 和 HTTP/SSE 流量发生器，用于比较 Ray Serve 在四个 SGLang 后端上的路由效果。实验保持模型、后端、请求内容和到达时间不变，只调整 Ray Serve 配置或请求路由器。
-
-建议先复现 Ray Serve 默认配置，再调整公开参数，最后尝试扩展或自定义请求路由器。重点观察服务质量、负载分布和前缀缓存复用之间的关系。
+本目录提供课程固定负载和 HTTP/SSE 流量发生器，用于比较四种 Ray Serve 路由配置。A-D 四组实验均通过同一个 Ray Serve HTTP 入口发送请求；模型、SGLang 配置、四副本拓扑、请求内容和到达时间保持不变。
 
 ## 快速开始
 
-流量发生器需要 Python 3.10 或更高版本。进入本目录后安装客户端依赖，并先校验固定负载：
+需要 Python 3.10 或更高版本。进入本目录后安装客户端依赖并校验负载：
 
 ```bash
 python -m pip install -r requirements.txt
 python validate_workload.py mooncake_prefix_workload_v2_seed2026.jsonl
 ```
 
-准备一个可访问的 Ray Serve 入口后即可回放负载：
+校验结果应包含以下内容：
+
+```text
+sha256: f154ba954e28ca9612257edf5deb0d5dfc6bf27fd0115a701e1f49e52df75b03
+families: 64
+warmups: 64
+measured: 2048
+planned_duration_s: 29.538768
+```
+
+Ray Serve 入口准备完成后，可以运行一轮 A 组实验：
 
 ```bash
 python run_workload.py \
   --policy serve \
-  --run-name p2c_default \
+  --run-name A_default_run1 \
+  --router-name p2c \
+  --max-ongoing-requests 5 \
   --base-url http://127.0.0.1:8000 \
   --workload mooncake_prefix_workload_v2_seed2026.jsonl \
   --max-in-flight 2048 \
-  --output-dir results/p2c_default
+  --output-dir results/A_default/run-1
 ```
 
-服务端接口约定和完整对照流程见下文。
+`run_workload.py` 只负责回放和测量，不会启动 Ray、Ray Serve 或 SGLang。
 
-## 文件
+## 文件说明
 
 | 文件 | 作用 |
 | --- | --- |
-| `mooncake_prefix_workload_v2_seed2026.jsonl` | 已生成到达时间的课程固定负载，可直接回放 |
-| `mooncake_prefix_families_v2_seed2026.jsonl` | 同一批请求，不含到达时间，可用于重新设计流量阶段 |
+| `mooncake_prefix_workload_v2_seed2026.jsonl` | A-D 正式实验使用的固定负载 |
 | `run_workload.py` | 发送流式请求并记录逐请求指标 |
-| `validate_workload.py` | 检查请求数、前缀关系、到达序列和文件摘要 |
-| `compare_runs.py` | 汇总多个实验配置的差异 |
-| `sample_prefix_families.py` | 从 Mooncake trace 复现前缀族采样 |
-| `make_arrivals.py` | 生成固定的 Poisson 到达序列 |
+| `validate_workload.py` | 检查请求规模、前缀关系、到达序列和文件摘要 |
+| `compare_runs.py` | 汇总每个配置的重复实验，并计算均值和范围 |
+| `mooncake_prefix_families_v2_seed2026.jsonl` | 生成固定到达序列前的中间数据 |
+| `sample_prefix_families.py` | 从 Mooncake trace 生成中间数据 |
+| `make_arrivals.py` | 为中间数据生成 Poisson 到达序列 |
+| `tests/` | 流量发生器和汇总器的自动测试 |
 
-## 负载规模
+正式 A-D 结果只能使用 `mooncake_prefix_workload_v2_seed2026.jsonl`。校验器和流量发生器都会核对该文件的 SHA-256。中间数据和生成脚本用于核验数据来源，不用于修改正式实验的请求比例、到达速率或顺序。
 
-数据来源为 [Mooncake FAST'25 tool-agent trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/toolagent_trace.jsonl)。固定负载包含：
+## 负载内容
+
+负载由 [Mooncake FAST'25 tool-agent trace](https://github.com/kvcache-ai/Mooncake/blob/main/FAST25-release/traces/toolagent_trace.jsonl) 派生，保留了 trace 中的前缀关系和生成长度。原始 trace 不含 Prompt token ID 和请求到达时间，因此这两部分由课程脚本确定性生成。
 
 | 项目 | 数值 |
 | --- | ---: |
@@ -53,55 +66,37 @@ python run_workload.py \
 | 单请求输入长度 | 1,216-1,600 tokens |
 | 单请求输出长度 | 16-190 tokens |
 
-64 个前缀族分为 1 个超热、7 个热、24 个中等热度和 32 个冷前缀族。每个前缀族至少共享 1024 个 token。超热前缀族包含 768 条测量请求，每条生成 190 tokens，用来形成持续热点；其余请求分散在不同前缀族中。
+每个前缀族至少共享 1024 个 token。负载包含 1 个超热、7 个热、24 个中等热度和 32 个冷前缀族；其中超热前缀族有 768 条测量请求，每条生成 190 tokens，用于同时形成缓存热点和持续生成压力。
 
-测量请求使用三段固定到达序列：
+测量请求按固定顺序分为三个阶段：
 
 | 阶段 | 请求数 | 平均到达速率 |
 | --- | ---: | ---: |
-| steady | 512 | 40 req/s |
-| burst | 1024 | 120 req/s |
-| recovery | 512 | 60 req/s |
+| `steady` | 512 | 40 req/s |
+| `burst` | 1024 | 120 req/s |
+| `recovery` | 512 | 60 req/s |
 
-计划发送时间约 29.54 秒。该规模足以在四个课程小模型后端上形成可观察的排队，同时仍适合在单机实验中反复运行。
+热点比例用于形成路由压力，不代表 Mooncake 原始业务的请求比例。
 
-文件摘要：
+## 服务接口
 
-```text
-Mooncake source SHA-256:
-48a2db1a13d3bc05e6330140c64f604ba366df20d3c9e128b5c35a01c1fa5f71
-
-families v2 SHA-256:
-54fc4f69b065dbc8e832275ff9e51d58a9cc7df91376b201210ec6c92c822742
-
-workload v2 SHA-256:
-f154ba954e28ca9612257edf5deb0d5dfc6bf27fd0115a701e1f49e52df75b03
-```
-
-## 数据说明
-
-Mooncake trace 提供每个 512-token 块的 `hash_ids`，不提供原始 Prompt token IDs。采样脚本保留 trace 中的前缀相等关系和输出长度，并生成适合课程模型的确定性 token IDs：
-
-1. 每个 trace hash block 映射为 128 个 token，最多保留 12 个块。
-2. 相同 `hash_id` 始终映射为相同 token 序列。
-3. 同一前缀族至少共享前 8 个块，即 1024 个 token。
-4. 每条请求追加 64 个独立后缀，避免整条输入完全相同。
-5. 为形成不同热度，脚本会确定性地重复选取同族 trace 记录；每次回放使用独立后缀。
-6. 超热族从固定采样候选中按 trace 平均输出长度选出，使单副本热点同时具有持续 Decode 压力。
-
-因此它是 **trace-derived workload**：前缀关系和生成长度取自公开 trace，Prompt token IDs 和到达时间由课程脚本生成。热点比例是路由压力条件，不代表 Mooncake 原始业务的请求比例。
-
-## 服务要求
-
-准备四个相同配置的 SGLang 服务，每个 Ray Serve Replica 固定转发至其中一个服务：
+实验服务应具有以下结构：
 
 ```text
-Client -> Ray Serve HTTP proxy -> Replica 0..3 -> SGLang backend 0..3
+Client -> Ray Serve HTTP Proxy -> Replica 0..3 -> SGLang backend 0..3
 ```
 
-默认 token 生成范围为 `4096-64095`，可直接用于课程指定的 Qwen3 模型。使用词表较小的其他模型时，应通过 `--token-base` 和 `--token-span` 缩小范围，并在所有对照中保持一致。
+Ray Serve 入口需接收 `POST /generate`，并将请求体和以下请求头转发给 SGLang：
 
-Ray Serve 入口需透传 SGLang 的流式 `POST /generate` 响应。为统计请求分布，建议在响应中加入：
+```text
+X-Session-Id
+X-Workload-Request-ID
+X-Prefix-Family
+```
+
+`X-Session-Id` 和 `X-Prefix-Family` 的值均为当前请求的前缀族 ID。路由器可以读取这些值，但不得读取未来请求或修改 workload。
+
+Ray Serve 应将 SGLang 的 SSE 响应流原样返回，并在响应中加入：
 
 ```text
 X-Ray-Replica-ID
@@ -109,54 +104,108 @@ X-Ray-Node-ID
 X-SGLang-Backend
 ```
 
-流量发生器会为每个请求发送 `X-Session-Id`，其值为前缀族 ID。自定义路由器可读取这个请求头，但不应读取未来请求或修改 workload。
+三个值应分别稳定标识实际处理请求的 Serve Replica、Ray 节点和 SGLang 后端。缺少响应头、请求失败、输出 token 数不完整，或测量阶段没有覆盖四个 Replica、四个节点和四个后端时，流量发生器会以非零状态退出。
 
-## 运行对照实验
+默认生成的输入 token ID 位于 `4096-64095`。课程模型 `Qwen/Qwen3-0.6B` 可以直接使用；更换模型时，应确认该范围没有超过模型词表，并保证所有对照组使用相同的 `--token-base` 和 `--token-span`。
 
-每轮实验前清空四个 SGLang 后端的 Radix Cache，再启动当前 Ray Serve 配置。流量发生器先顺序发送 64 条预热请求，然后按固定到达时间发送 2048 条测量请求：
+## 运行 A-D
+
+每一轮都按以下顺序执行：
+
+1. 停止上一轮 Ray Serve 应用，使用本轮配置重新部署。
+2. 分别调用四个 SGLang 后端的 `POST /flush_cache`，确认全部成功。
+3. 启动流量发生器。它会先顺序完成 64 条预热请求，再发送 2048 条测量请求。
+4. 检查进程退出状态和 `summary.json`，确认本轮有效。
+
+所有正式实验统一使用 `--policy serve`。`--router-name` 和 `--max-ongoing-requests` 只记录配置，实际 Ray Serve 部署必须使用相同的值。
+
+四组配置如下：
+
+| 组别 | `--router-name` | `--max-ongoing-requests` | Ray Serve 配置 |
+| --- | --- | ---: | --- |
+| A | `p2c` | `5` | 默认请求路由器 |
+| B 候选 | `p2c` | 候选值 | 默认请求路由器；至少测试两个非默认值 |
+| B 最终 | `p2c` | 选定值 | 使用候选实验选出的值 |
+| C | `consistent_hash` | B 的选定值 | `ConsistentHashRouter`，`num_fallback_replicas=0` |
+| D | 自定义名称 | B 的选定值 | 自行扩展或实现的路由器 |
+
+组 A、B 最终、C、D 至少各运行两轮。每轮使用独立输出目录，例如：
 
 ```bash
 python run_workload.py \
   --policy serve \
-  --run-name p2c_default \
+  --run-name C_affinity_run2 \
+  --router-name consistent_hash \
+  --max-ongoing-requests 32 \
   --base-url http://127.0.0.1:8000 \
   --workload mooncake_prefix_workload_v2_seed2026.jsonl \
   --max-in-flight 2048 \
-  --output-dir results/p2c_default
+  --output-dir results/C_affinity/run-2
 ```
 
-修改 Ray Serve 配置或路由器后，使用不同的 `--run-name` 和输出目录回放同一文件。例如：
+结果目录中已有本工具生成的文件时，程序会停止，避免覆盖旧实验。确需重跑同一路径时可以添加 `--overwrite`。
+
+## 输出与判定
+
+每轮成功执行后生成四个文件：
+
+| 文件 | 内容 |
+| --- | --- |
+| `config.json` | 命令、模型、路由器、并发参数、负载 SHA-256、校验状态和自定义备注 |
+| `warmups.csv` | 64 条预热请求的结果 |
+| `requests.csv` | 2048 条测量请求的逐请求结果 |
+| `summary.json` | 全程、各流量阶段和各热度层级的汇总指标 |
+
+预热阶段失败时会生成 `failure.json` 并停止，不再发送测量请求。
+
+`requests.csv` 中主要字段如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `ttft_s` | 从发送请求到收到首个输出 token 的时间 |
+| `tpot_s` | 收到首个 token 后，平均生成一个 token 的时间 |
+| `latency_s` | 请求端到端时间 |
+| `dispatch_lag_s` | 实际开始发送相对计划到达时间的偏差 |
+| `client_queue_s` | 请求等待客户端并发槽位的时间 |
+| `cached_tokens` | SGLang 报告的缓存命中 token 数 |
+| `replica_id`、`ray_node_id`、`backend` | 实际处理请求的路由位置 |
+
+一轮正式结果应同时满足：
+
+- `successful=2048`，`failed=0`，`incomplete=0`；
+- `warmup_successful=64`，`warmup_failed=0`，`warmup_incomplete=0`；
+- `validation_errors=[]`；
+- `replica_distribution`、`node_distribution` 和 `backend_distribution` 各有四项；
+- `dispatch_lag_s` 和 `client_queue_s` 相对服务延迟较小，客户端没有成为主要瓶颈。
+
+运行命令可通过重复的 `--metadata KEY=VALUE` 将 GPU、SGLang 参数或代码版本写入 `config.json`。
+
+## 汇总重复实验
+
+同一个 `NAME` 可以传入多轮结果。下面的命令要求 A-D 各至少有两轮有效数据：
 
 ```bash
-python run_workload.py \
-  --policy serve \
-  --run-name improved \
-  --base-url http://127.0.0.1:8000 \
-  --workload mooncake_prefix_workload_v2_seed2026.jsonl \
-  --max-in-flight 2048 \
-  --output-dir results/improved
-
 python compare_runs.py \
-  --baseline p2c_default \
-  --run p2c_default=results/p2c_default/summary.json \
-  --run improved=results/improved/summary.json \
+  --baseline A \
+  --min-repeats 2 \
+  --run A=results/A_default/run-1/summary.json \
+  --run A=results/A_default/run-2/summary.json \
+  --run B=results/B_final/run-1/summary.json \
+  --run B=results/B_final/run-2/summary.json \
+  --run C=results/C_affinity/run-1/summary.json \
+  --run C=results/C_affinity/run-2/summary.json \
+  --run D=results/D_improved/run-1/summary.json \
+  --run D=results/D_improved/run-2/summary.json \
   --output results/comparison.json
 ```
 
-## 结果检查
+`comparison.json` 给出每项指标的原始值、均值、最小值和最大值，并以 A 组两轮均值为基准计算相对变化。`throughput_gain`、`ttft_p95_reduction` 和 `latency_p95_reduction` 为比例，`cache_hit_rate_delta` 为命中率之差。程序会拒绝失败、输出不完整、测量请求数不是 2048、重复轮次配置不一致，或模型与负载等对照条件不同的结果。
 
-每个配置会生成 `warmups.csv`、`requests.csv` 和 `summary.json`。报告至少检查：
+报告应同时比较吞吐量、TTFT p50/p95/p99、端到端延迟 p95、缓存命中率、实际 Prefill token 数，以及四个后端的请求和 token 分布。还应分别查看 `steady`、`burst` 和 `recovery`，说明性能变化来自缓存复用、负载分布还是排队。
 
-1. 2048 条测量请求全部成功，并完整生成指定 token 数。
-2. 四个 Replica 和四个 SGLang 后端均收到请求。
-3. `dispatch_lag` 与 `client_queue` 相对服务时延足够小，客户端没有成为瓶颈。
-4. 对比吞吐量、TTFT p50/p95/p99、端到端延迟 p95、缓存命中率和实际 Prefill token 数。
-5. 同时给出四个后端的请求与 token 分布，解释服务质量变化来自哪里。
-6. 分别查看 steady、burst 和 recovery 阶段，避免只用全程平均值掩盖突发流量。
+## 核验数据来源
 
-绝对性能会随模型和 GPU 改变，作业关注同一设备上的相对结果。所有对照组必须复用同一个 workload；如确需调整速率，应重新生成一份文件，并让全部配置共同使用它。
-
-## 复现固定负载
+以下步骤仅用于核验固定负载的生成过程：
 
 ```bash
 curl -L -o toolagent_trace.jsonl \
@@ -172,6 +221,14 @@ python make_arrivals.py \
   --profile steady:512:40,burst:1024:120,recovery:512:60 \
   --seed 2026 \
   --output mooncake_prefix_workload_v2_seed2026.jsonl
+
+python validate_workload.py mooncake_prefix_workload_v2_seed2026.jsonl
 ```
 
-复现后应再次运行 `validate_workload.py`，核对规模、分布与 SHA-256。
+核验得到的文件摘要应与本页开头一致。A-D 正式实验仍应使用仓库中发布的固定文件。
+
+运行本目录的自动测试：
+
+```bash
+python -m unittest discover -s tests -v
+```

@@ -8,6 +8,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 
+FIXED_WORKLOAD_SHA256 = (
+    "f154ba954e28ca9612257edf5deb0d5dfc6bf27fd0115a701e1f49e52df75b03"
+)
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -23,6 +28,7 @@ def main() -> int:
     parser.add_argument("--warmups", type=int, default=64)
     parser.add_argument("--measured", type=int, default=2048)
     parser.add_argument("--backends", type=int, default=4)
+    parser.add_argument("--expected-sha256", default=FIXED_WORKLOAD_SHA256)
     args = parser.parse_args()
 
     with args.workload.open("r", encoding="utf-8") as file:
@@ -78,8 +84,14 @@ def main() -> int:
     if any(route < 0 or route >= args.backends for route in family_routes.values()):
         raise ValueError("affinity_backend is outside the configured backend range")
 
+    digest = sha256(args.workload)
+    if args.expected_sha256 and digest != args.expected_sha256:
+        raise ValueError(
+            f"expected SHA-256 {args.expected_sha256}, got {digest}"
+        )
+
     result = {
-        "sha256": sha256(args.workload),
+        "sha256": digest,
         "records": len(records),
         "families": len(by_family),
         "warmups": len(warmups),
