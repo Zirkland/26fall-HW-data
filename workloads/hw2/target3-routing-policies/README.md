@@ -124,23 +124,22 @@ X-SGLang-Backend
 | 组别 | `--router-name` | `--max-ongoing-requests` | Ray Serve 配置 |
 | --- | --- | ---: | --- |
 | A | `p2c` | `5` | 默认请求路由器 |
-| B 候选 | `p2c` | 候选值 | 默认请求路由器；至少测试两个非默认值 |
-| B 最终 | `p2c` | 选定值 | 使用候选实验选出的值 |
+| B 候选 | `p2c` | 两个非默认值 | 每个候选值运行一轮，并从中选择一个参数 |
 | C | `consistent_hash` | B 的选定值 | `ConsistentHashRouter`，`num_fallback_replicas=0` |
 | D | 自定义名称 | B 的选定值 | 自行扩展或实现的路由器 |
 
-组 A、B 最终、C、D 至少各运行两轮。每轮使用独立输出目录，例如：
+组 A 和 D 各运行两轮，两个 B 候选值和 C 各运行一轮，共七轮。组 B 选定参数后不再另行重复。每轮使用独立输出目录，例如：
 
 ```bash
 python run_workload.py \
   --policy serve \
-  --run-name C_affinity_run2 \
+  --run-name C_affinity_run1 \
   --router-name consistent_hash \
   --max-ongoing-requests 32 \
   --base-url http://127.0.0.1:8000 \
   --workload mooncake_prefix_workload_v2_seed2026.jsonl \
   --max-in-flight 2048 \
-  --output-dir results/C_affinity/run-2
+  --output-dir results/C_affinity/run-1
 ```
 
 结果目录中已有本工具生成的文件时，程序会停止，避免覆盖旧实验。确需重跑同一路径时可以添加 `--overwrite`。
@@ -182,26 +181,24 @@ python run_workload.py \
 
 ## 汇总重复实验
 
-同一个 `NAME` 可以传入多轮结果。下面的命令要求 A-D 各至少有两轮有效数据：
+同一个 `NAME` 可以传入多轮结果。A、D 使用相同名称汇总两轮，两个 B 候选分别记为 B1、B2：
 
 ```bash
 python compare_runs.py \
   --baseline A \
-  --min-repeats 2 \
   --run A=results/A_default/run-1/summary.json \
   --run A=results/A_default/run-2/summary.json \
-  --run B=results/B_final/run-1/summary.json \
-  --run B=results/B_final/run-2/summary.json \
+  --run B1=results/B_candidate-1/summary.json \
+  --run B2=results/B_candidate-2/summary.json \
   --run C=results/C_affinity/run-1/summary.json \
-  --run C=results/C_affinity/run-2/summary.json \
   --run D=results/D_improved/run-1/summary.json \
   --run D=results/D_improved/run-2/summary.json \
   --output results/comparison.json
 ```
 
-`comparison.json` 给出每项指标的原始值、均值、最小值和最大值，并以 A 组两轮均值为基准计算相对变化。`throughput_gain`、`ttft_p95_reduction` 和 `latency_p95_reduction` 为比例，`cache_hit_rate_delta` 为命中率之差。程序会拒绝失败、输出不完整、测量请求数不是 2048、重复轮次配置不一致，或模型与负载等对照条件不同的结果。
+`comparison.json` 给出每项指标的原始值、均值、最小值和最大值，并以 A 组两轮均值为基准计算相对变化。A、D 可据此报告两轮范围；B1、B2 和 C 为单轮结果。程序会拒绝失败、输出不完整、测量请求数不是 2048、重复轮次配置不一致，或模型与负载等对照条件不同的结果。
 
-报告应同时比较吞吐量、TTFT p50/p95/p99、端到端延迟 p95、缓存命中率、实际 Prefill token 数，以及四个后端的请求和 token 分布。还应分别查看 `steady`、`burst` 和 `recovery`，说明性能变化来自缓存复用、负载分布还是排队。
+报告主表比较成功率、吞吐量、缓存命中率、实际 Prefill token 数、TTFT p95、端到端延迟 p95，以及四个后端的请求分布。其他逐请求指标和 `steady`、`burst`、`recovery` 分阶段结果按需用于解释缓存复用、负载分布或排队，无需全部放入正文。
 
 ## 核验数据来源
 
